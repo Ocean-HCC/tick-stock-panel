@@ -1,0 +1,9 @@
+name: tencent
+display_name: "腾讯财经(五档盘口)"
+runtime: none
+entry: app.plugins.tencent.provider:TencentProvider
+check: app.plugins.tencent.provider:availability
+datasets: [depth5]
+description: "沪深股票与ETF五档盘口；网页行情非授权商业API，存在版权、反爬及中断风险，启用前请自行评估。仅接管五档，不改变其他数据源。"
+install_hint: "无需额外依赖或Key；先通过试拉接口验证，再在能力路由中选择五档来源。"
+homepage: "https://stockapp.finance.qq.com/"
