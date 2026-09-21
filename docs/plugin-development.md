@@ -3,6 +3,7 @@
 数据源插件是可选的行情数据来源(fuyao、stock-sdk、akshare 等),作为独立模块放在
 `backend/app/plugins/` 下。services 层(kline_sync / quote_service / financial_sync)
 全部通过统一路由点分流:插件声明了某数据集就走插件,未声明自动回退 TickFlow。
+五档 `depth5` 例外：按独立路由严格取数，缺能力或失败时不跨源回退。
 因此**一个合格的插件只需要正确实现契约,不需要改动任何 service / API 代码**;
 反过来,插件也必须遵守内部数据契约(单位、代码格式、复权口径),框架不会替你转换。
 
@@ -65,6 +66,9 @@ TickFlow 的「先探后存」语义:
 > 详见 [deployment.md](./deployment.md)。
 
 `runtime` 字段当前仅用于 UI 展示, 实际依赖检测由 `check` 函数负责。
+
+腾讯五档插件示例位于 `backend/app/plugins/tencent/`，仅声明 `depth5`，使用现有 httpx，
+无需新增依赖。部署、试拉、数据时效和限速边界见 [腾讯五档说明](./tencent-depth5.md)。
 
 ### check 函数
 
@@ -186,8 +190,10 @@ class MyProvider:
 ```
 
 `get_depth_batch` 返回结构如下。价格和数量数组均按一档到五档排列;数量单位为“手”,
-`timestamp` 为毫秒 Unix 时间戳。服务层按 capability 的 `batch` / `rpm` 统一分片限速,
-provider 不应自行切换或回退到其他数据源。
+`timestamp` 为毫秒 Unix 时间戳。服务层按 capability 的 `batch` / `rpm` 统一分片限速，
+但当前能力增广不读取插件 `config.datasets` 的 batch/rpm，且可能保留 TickFlow 的限制。
+若上游有更严格的约束，插件必须额外限制实际 HTTP 批量和请求频率；不能仅声明元数据
+就认为限速生效。provider 不应自行切换或回退到其他数据源。
 
 ```python
 {
