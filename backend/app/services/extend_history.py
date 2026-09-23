@@ -87,6 +87,12 @@ def _refresh_single_view(repo: KlineRepository, name: str) -> None:
         logger.warning("refresh view %s failed: %s", name, e)
 
 
+def run_extend_etf_history(repo, capset, plan, on_progress=None, on_checkpoint=None):
+    from app.services.etf_history import run
+    return run(repo, capset, plan, on_progress or (lambda *args: None),
+               on_checkpoint or (lambda result: None))
+
+
 def compute_offset(value: int, unit: str) -> timedelta:
     """将用户输入的 value + unit 转成 timedelta。"""
     if unit == "day":

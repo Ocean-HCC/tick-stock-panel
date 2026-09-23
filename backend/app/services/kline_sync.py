@@ -506,6 +506,10 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
     if not symbols:
         return 0, []
 
+    if asset_type == "etf":
+        from app.enriched_generation import get_enriched_generation
+        get_enriched_generation(repo.store.data_dir, "etf")
+
     provider_name = preferences.get_adj_factor_provider()
     if provider_name != "tickflow":
         from app.data_providers import custom as custom_sources

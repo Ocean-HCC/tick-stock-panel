@@ -2486,10 +2486,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ confirm: true }),
     }),
-  extendHistory: (value: number, unit: 'day' | 'month' | 'year') =>
+  extendHistory: (value: number, unit: 'day' | 'month' | 'year', options?: { asset_type: 'etf'; expected_earliest_date: string }) =>
     request<{ status: string; job_id: string }>('/api/kline/extend_history', {
       method: 'POST',
-      body: JSON.stringify({ value, unit }),
+      body: JSON.stringify({ value, unit, ...options }),
     }),
   repairDaily: (startDate: string) =>
     request<{ status: string; job_id: string }>('/api/kline/repair_daily', {
@@ -3749,15 +3749,25 @@ export interface PipelineJob {
   started_at: string | null
   finished_at: string | null
   duration_s: number | null
+  plan?: { asset_type?: 'stock' | 'etf' } | null
+  worker_active?: boolean
   result: {
     universe_size: number
-    daily_days: number
-    adj_factor_symbols: number
-    enriched_days: number
+    daily_days?: number
+    adj_factor_symbols?: number
+    enriched_days?: number
     index_count?: number
     index_daily_rows?: number
-    minute_rows: number
+    minute_rows?: number
     skipped_stages?: string[]
+    asset_type?: 'stock' | 'etf'
+    outcome?: 'success' | 'partial' | 'failed'
+    daily_rows_written?: number
+    enriched_rows_written?: number
+    earliest_after?: string
+    warnings?: string[]
+    coverage?: { symbol: string; earliest: string; price_basis: 'local_factors_unverified' | 'raw_unverified' }[]
+    failures?: { symbol: string; reason: string }[]
   } | null
   error: string | null
 }
@@ -3766,6 +3776,7 @@ export type PipelineJobSummary = Omit<PipelineJob, 'log'>
 
 // ===== Data status =====
 interface TableStats {
+  storage?: 'etf' | 'legacy_index'
   rows: number
   earliest_date: string | null
   latest_date: string | null

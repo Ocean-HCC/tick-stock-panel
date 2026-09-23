@@ -1428,9 +1428,14 @@ async def extend_history(request: Request):
     import traceback as _tb
     try:
         body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="请求须为 JSON 对象")
         value = body.get("value")
         unit = body.get("unit", "month")
-        if not value or value <= 0:
+        asset_type = body.get("asset_type", "stock")
+        if asset_type not in ("stock", "etf"):
+            raise HTTPException(status_code=400, detail="asset_type 只支持 stock/etf")
+        if type(value) is not int or value <= 0:
             raise HTTPException(status_code=400, detail="value 必须为正整数")
         if unit not in ("day", "month", "year"):
             raise HTTPException(status_code=400, detail="unit 只支持 day/month/year")
@@ -1439,14 +1444,32 @@ async def extend_history(request: Request):
         capset = request.app.state.capabilities
 
         from app.tickflow.capabilities import Cap
-        if not capset.has(Cap.KLINE_DAILY_BATCH):
+        if asset_type == "stock" and not capset.has(Cap.KLINE_DAILY_BATCH):
             raise HTTPException(status_code=403, detail="需要 Pro+ 权限 (batch K-line)")
 
         from app.services.extend_history import run_extend_history
         from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, run_with_capacity, try_acquire_run_slot
         from app.api.data import invalidate_storage_cache
 
-        job_id, is_new = job_store.create()
+        plan = None
+        if asset_type == "etf":
+            from app.services.etf_history import (
+                StaleEtfRangeError,
+                prepare_extension,
+                validate_source,
+            )
+            active = job_store.active_id()
+            if active:
+                return {"status": "reused", "job_id": active}
+            try:
+                plan = await asyncio.to_thread(prepare_extension, repo, value, unit, body.get("expected_earliest_date"))
+                if not plan.get("recovery_only"):
+                    validate_source(capset)
+            except StaleEtfRangeError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        job_id, is_new = job_store.create(long_running=True, plan=plan) if plan else job_store.create()
         if not is_new:
             return {"status": "reused", "job_id": job_id}
 
@@ -1461,13 +1484,27 @@ async def extend_history(request: Request):
                 job_store.progress(job_id, stage, pct, msg,
                                    stage_pct=stage_pct, skip_log=skip_log)
 
+            def work():
+                if plan is None:
+                    return run_extend_history(repo, capset, value, unit, on_progress=progress)
+                from contextlib import nullcontext
+
+                from app.services.extend_history import run_extend_etf_history
+                quotes = getattr(request.app.state, "quote_service", None)
+                try:
+                    with quotes.quiesced() if quotes is not None else nullcontext():
+                        return run_extend_etf_history(repo, capset, plan, on_progress=progress,
+                                                      on_checkpoint=lambda r: job_store.checkpoint(job_id, r))
+                finally:
+                    repo.invalidate_etf_cache()
+
             try:
                 result = await loop.run_in_executor(
                     _long_task_executor, run_with_capacity, job_id,
-                    lambda: run_extend_history(repo, capset, value, unit, on_progress=progress),
+                    work,
                 )
-                if "error" in result:
-                    job_store.fail(job_id, result["error"])
+                if "error" in result or result.get("outcome") == "failed":
+                    job_store.fail(job_id, result.get("error", "未取得更早的 ETF 日 K,请检查来源与历史覆盖"))
                 else:
                     job_store.succeed(job_id, result)
                 invalidate_storage_cache()
@@ -1476,10 +1513,13 @@ async def extend_history(request: Request):
                 invalidate_storage_cache()
             except Exception as e:
                 logger.exception("extend_history failed: job_id=%s", job_id)
-                job_store.fail(job_id, str(e))
+                message = str(e) if plan is None or isinstance(e, ValueError) else "ETF 扩展中断,请检查任务记录;再次获取可恢复待发布批次"
+                job_store.fail(job_id, message)
                 invalidate_storage_cache()
             finally:
                 release_run_slot(job_id)
+                if plan:
+                    job_store.finish_worker(job_id)
 
         asyncio.create_task(task())
         return {"status": "started", "job_id": job_id}

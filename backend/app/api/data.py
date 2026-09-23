@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from app.enriched_generation import EnrichedPublication
 from app.indicators.pipeline import ENRICHED_COLUMNS
@@ -328,7 +328,7 @@ def _safe_aggregate_etf_daily(repo) -> dict | None:
                SELECT DISTINCT symbol FROM instruments_index WHERE asset_type = 'etf'
            )""",
     ]
-    for sql in queries:
+    for storage, sql in zip(("etf", "legacy_index"), queries, strict=True):
         try:
             row = repo.execute_one(sql)
         except Exception as e:  # noqa: BLE001
@@ -336,6 +336,7 @@ def _safe_aggregate_etf_daily(repo) -> dict | None:
             continue
         if row and row[0]:
             return {
+                "storage": storage,
                 "rows": int(row[0]),
                 "earliest_date": str(row[1]) if row[1] else None,
                 "latest_date": str(row[2]) if row[2] else None,
@@ -616,6 +617,18 @@ def status(request: Request) -> dict:
 
 @router.post("/clear")
 def clear_data(request: Request):
+    from app.services.pipeline_jobs import job_store, release_run_slot, try_acquire_run_slot
+    if job_store.active_id() or not try_acquire_run_slot("clear-data"):
+        raise HTTPException(status_code=409, detail="已有数据任务运行,请稍后清空")
+    try:
+        if (request.app.state.repo.store.data_dir / ".etf_history_pending.json").exists():
+            raise HTTPException(status_code=409, detail="请先通过 ETF 获取恢复中断批次")
+        return _clear_data(request)
+    finally:
+        release_run_slot("clear-data")
+
+
+def _clear_data(request: Request):
     """清除所有本地 Parquet 数据（保留 capabilities.json 和目录结构）。"""
     import shutil
 

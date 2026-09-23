@@ -1035,6 +1035,7 @@ class KlineRepository:
     def _refresh_etf_enriched(self) -> None:
         """从 ETF enriched parquet 加载最新日到内存缓存。"""
         try:
+            generation = get_enriched_generation(self.store.data_dir, "etf")
             enriched_dir = self.store.data_dir / "kline_etf_enriched"
             dates = sorted(
                 p.name[5:] for p in enriched_dir.glob("date=*")
@@ -1065,11 +1066,15 @@ class KlineRepository:
                 priority="background",
             )
             if df_hist.is_empty():
-                self._etf_enriched_cache = df_latest.sort(["symbol"])
+                cache = df_latest.sort(["symbol"])
             else:
                 df_full = compute_signals(compute_indicators(df_hist))
-                self._etf_enriched_cache = df_full.filter(pl.col("date") == latest).sort(["symbol"])
-            self._etf_enriched_cache_date = latest
+                cache = df_full.filter(pl.col("date") == latest).sort(["symbol"])
+            with self._write_lock:
+                if generation != get_enriched_generation(self.store.data_dir, "etf"):
+                    return
+                self._etf_enriched_cache = cache
+                self._etf_enriched_cache_date = latest
         except Exception as e:  # noqa: BLE001
             logger.debug("ETF enriched 缓存刷新跳过: %s", e)
 
@@ -1178,6 +1183,12 @@ class KlineRepository:
             return pl.DataFrame(), self._enriched_cache_date
         return self._enriched_cache, self._enriched_cache_date
 
+    def invalidate_etf_cache(self) -> None:
+        self._etf_enriched_cache = None
+        self._etf_enriched_cache_date = None
+        self._etf_live_agg_cache = None
+        self._etf_live_agg_cache_date = None
+
     def get_enriched_latest_asset(self, asset_type: str, refresh: bool = True) -> tuple[pl.DataFrame, date | None]:
         """按资产类型返回最新 enriched 缓存。stock 保持旧缓存语义。
 
@@ -1188,8 +1199,12 @@ class KlineRepository:
         if asset_type == "stock":
             return self.get_enriched_latest()
         if asset_type == "etf":
+            generation = get_enriched_generation(self.store.data_dir, "etf")
             if self._etf_enriched_cache is None and refresh:
                 self._refresh_etf_enriched()
+            if generation != get_enriched_generation(self.store.data_dir, "etf"):
+                self.invalidate_etf_cache()
+                raise EnrichedGenerationUnavailableError("ETF data changed during read")
             if self._etf_enriched_cache is None:
                 return pl.DataFrame(), self._etf_enriched_cache_date
             return self._etf_enriched_cache, self._etf_enriched_cache_date
@@ -1560,6 +1575,19 @@ class KlineRepository:
         return df
 
     def get_etf_daily(
+        self,
+        symbol: str,
+        start: date,
+        end: date,
+        columns: list[str] | None = None,
+    ) -> pl.DataFrame:
+        generation = get_enriched_generation(self.store.data_dir, "etf")
+        result = self._get_etf_daily(symbol, start, end, columns)
+        if generation != get_enriched_generation(self.store.data_dir, "etf"):
+            raise EnrichedGenerationUnavailableError("ETF data changed during read")
+        return result
+
+    def _get_etf_daily(
         self,
         symbol: str,
         start: date,
@@ -2285,6 +2313,9 @@ class KlineRepository:
         publication: EnrichedPublication | None,
     ) -> None:
         """锁内的纯文件阶段: 无变化跳过; 否则原子替换 + 提交 generation。"""
+        if (out.relative_to(self.store.data_dir).parts[0] in {"kline_etf_daily", "kline_etf_enriched"}
+                and (self.store.data_dir / ".etf_history_pending.json").exists()):
+            raise EnrichedGenerationUnavailableError("ETF history publication requires recovery")
         if not existing.is_empty() and existing.equals(merged):
             if publication is not None:
                 publication.commit()  # 未写入时为无害空提交
@@ -2405,6 +2436,8 @@ class KlineRepository:
         # 覆写语义: 排序在锁外, 锁内只做原子替换。
         df_sorted = df.sort(["symbol", "date"])
         with self._write_lock:
+            if asset_type == "etf":
+                get_enriched_generation(self.store.data_dir, "etf")
             self._atomic_write_parquet(df_sorted, out)
 
     def flush_live_enriched(self, df: pl.DataFrame) -> None:

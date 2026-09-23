@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -118,6 +119,14 @@ class JobStore:
         """将 job 快照写入独立 JSON 文件(create/start/终态均落盘)。"""
         path = self._store_dir / f"{job['id']}.json"
         try:
+            if (job.get("plan") or {}).get("asset_type") == "etf":
+                temporary = path.with_suffix(".tmp")
+                with temporary.open("w", encoding="utf-8") as stream:
+                    json.dump(job, stream, ensure_ascii=False)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, path)
+                return
             path.write_text(
                 json.dumps(job, ensure_ascii=False, indent=None),
                 encoding="utf-8",
@@ -175,6 +184,10 @@ class JobStore:
             except Exception:
                 continue
             orig_status = j.get("status")
+            if j.get("worker_active") and (j.get("plan") or {}).get("asset_type") == "etf":
+                j["worker_active"] = False
+                if orig_status not in ("pending", "running"):
+                    self._write_file(j)
             if not j.get("id") or orig_status not in ("pending", "running"):
                 continue
             j["status"] = "failed"
@@ -203,6 +216,7 @@ class JobStore:
         timeout_s: int | None = None,
         *,
         long_running: bool = False,
+        plan: dict[str, Any] | None = None,
     ) -> tuple[str, bool]:
         """单飞创建任务。返回 (job_id, is_new)。
 
@@ -245,6 +259,7 @@ class JobStore:
                 "result": None,
                 "error": None,
                 "timeout_s": timeout_s,
+                "plan": copy.deepcopy(plan),
             }
             self._active_jobs[job_id] = job
             self._active_id = job_id
@@ -260,12 +275,30 @@ class JobStore:
             if not j:
                 return
             j["status"] = "running"
+            if (j.get("plan") or {}).get("asset_type") == "etf":
+                j["worker_active"] = True
             j["started_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
             # 心跳基准初始化为启动时刻: start() 到首次 progress() 之间的
             # 初始化阶段(解析标的池等)同样计入停滞计时。
             j["last_progress_at"] = j["started_at"]
             # running 快照落盘: 进程死亡后由下次启动的 _reap_orphans 补录
             self._write_file(j)
+
+    def checkpoint(self, job_id: str, result: dict[str, Any]) -> None:
+        """Persist published batches, including a batch finishing after cancellation."""
+        with self._lock:
+            j = self._active_jobs.get(job_id) or self._read_file(job_id)
+            if not j or (j.get("plan") or {}).get("asset_type") != "etf":
+                return
+            j["result"] = copy.deepcopy(result)
+            self._write_file(j)
+
+    def finish_worker(self, job_id: str) -> None:
+        with self._lock:
+            j = self._active_jobs.get(job_id) or self._read_file(job_id)
+            if j and (j.get("plan") or {}).get("asset_type") == "etf":
+                j["worker_active"] = False
+                self._write_file(j)
 
     def succeed(self, job_id: str, result: Any) -> None:
         with self._lock:
@@ -431,11 +464,15 @@ class JobStore:
         # 先置 cancel flag 再标失败: fail() 弹出记录后,僵尸线程的 progress()
         # 依赖 flag(而非记录)感知取消。
         request_cancel(job_id)
+        current = self.get(job_id)
+        retain_slot = ((current or {}).get("plan") or {}).get("asset_type") == "etf"
         self.fail(job_id, message)
         # 强制释放重任务槽(按所有权): 卡死线程可能永远回不来释放。
         # job 已标记 failed 且已请求终止; 僵尸线程即使后续短暂写盘,
         # 也会在下一个分块回调处自行退出, 下次拉取会覆盖, 安全。
-        release_run_slot(job_id)
+        # ETF publication must finish before another task can replace its files.
+        if not retain_slot:
+            release_run_slot(job_id)
 
     def clear(self) -> None:
         """清空所有任务（内存 + 磁盘文件 + 取消标志）。"""
@@ -463,6 +500,8 @@ def _summary(j: dict[str, Any]) -> dict[str, Any]:
         "duration_s": j["duration_s"],
         "result": j["result"],
         "error": j["error"],
+        "plan": j.get("plan"),
+        "worker_active": j.get("worker_active", False),
     }
 
 

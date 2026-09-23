@@ -199,6 +199,8 @@ def get_enriched_generation(
     *,
     initialize: bool = True,
 ) -> str:
+    if asset_type == "etf" and (Path(data_dir) / ".etf_history_pending.json").exists():
+        raise EnrichedGenerationUnavailableError("ETF history publication requires recovery")
     path = _marker_path(data_dir, asset_type)
     payload = _read_marker(path)
     if payload is None:
@@ -239,6 +241,8 @@ def enriched_publication_incomplete(
     data_dir: Path,
     asset_type: str = "stock",
 ) -> bool:
+    if asset_type == "etf" and (Path(data_dir) / ".etf_history_pending.json").exists():
+        return True
     try:
         payload = _read_marker(_marker_path(data_dir, asset_type))
     except EnrichedGenerationUnavailableError:
@@ -274,10 +278,12 @@ class EnrichedPublication:
         asset_type: str = "stock",
         *,
         recover: bool = False,
+        etf_history: bool = False,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.asset_type = asset_type
         self.recover = recover
+        self.etf_history = etf_history
         self._publishing = False
         self._changed = False
         self._base_generation: str | None = None
@@ -334,6 +340,9 @@ class EnrichedPublication:
         return generation
 
     def _claim_or_verify(self) -> None:
+        if (self.asset_type == "etf" and not self.etf_history
+                and (self.data_dir / ".etf_history_pending.json").exists()):
+            raise EnrichedGenerationUnavailableError("ETF history publication requires recovery")
         path = _marker_path(self.data_dir, self.asset_type)
         try:
             current = _read_marker(path)

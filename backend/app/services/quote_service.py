@@ -359,6 +359,19 @@ class QuoteService:
         finally:
             self.resume()
 
+    @contextmanager
+    def quiesced(self):
+        """Pause and drain in-flight fetches before an ETF history publication."""
+        was_paused = self._paused
+        self.pause()
+        try:
+            with self._fetch_lock:
+                pass
+            yield
+        finally:
+            if not was_paused:
+                self.resume()
+
     def boot_check(self) -> None:
         """启动时检查 preferences，若 enabled 则自动启动。
 
@@ -650,6 +663,8 @@ class QuoteService:
         的本轮不落盘 (见 _process_full_market_records)。
         """
         with self._fetch_lock:
+            if getattr(self, "_paused", False):
+                return False
             before = self._fetched_at
             if final:
                 logger.info("最终行情同步开始")
