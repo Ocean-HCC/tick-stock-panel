@@ -35,9 +35,15 @@ export function HistoryRow({ job, onClick }: { job: any; onClick: () => void }) 
           </div>
         </div>
       </div>
-      <div className="text-right shrink-0">
+      <div className="text-right min-w-0">
         {job.result && (() => {
           const r = job.result as Record<string, any>
+          if (r.asset_type === 'etf') return (
+            <div className="text-xs text-secondary font-mono">
+              {job.status === 'succeeded' && r.outcome === 'partial' ? '部分完成 · ' : ''}
+              日 K 写入 {r.daily_rows_written ?? 0} 行 · 指标写入 {r.enriched_rows_written ?? 0} 行 · <span className="whitespace-nowrap">最早 {r.earliest_after ?? '—'}</span>
+            </div>
+          )
           const parts: string[] = []
           if (r.daily_days != null) parts.push(`日K ${r.daily_days}日`)
           if (r.enriched_days != null) parts.push(`enriched ${r.enriched_days}行`)

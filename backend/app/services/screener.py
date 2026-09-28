@@ -15,6 +15,7 @@ from pathlib import Path
 
 import polars as pl
 
+from app.enriched_generation import EnrichedGenerationUnavailableError, get_enriched_generation
 from app.parquet import scan_enriched_parquet
 from app.tickflow.repository import KlineRepository
 
@@ -45,7 +46,7 @@ def enriched_history_days(data_dir, asset_type: str = "stock", as_of: date | Non
 
 
 # ── 进程级历史数据缓存 (避免 run_all 每次重新扫描 parquet + 计算指标) ──
-_history_cache: dict[tuple[str, date, int], tuple[float, pl.DataFrame]] = {}
+_history_cache: dict[tuple, tuple[float, pl.DataFrame]] = {}
 _HISTORY_CACHE_TTL = 120.0  # 秒
 
 # load_prior_consecutive 最多回看多少个已存在的日分区 (缺列时继续往前找的上限)
@@ -77,6 +78,15 @@ class ScreenerService:
         _history_cache.clear()
 
     def _load_enriched_for_date(self, target_date: date) -> pl.DataFrame:
+        if self.asset_type != "etf":
+            return self._load_enriched_for_date_impl(target_date)
+        generation = get_enriched_generation(self.repo.store.data_dir, "etf")
+        result = self._load_enriched_for_date_impl(target_date)
+        if generation != get_enriched_generation(self.repo.store.data_dir, "etf"):
+            raise EnrichedGenerationUnavailableError("ETF data changed during screening")
+        return result
+
+    def _load_enriched_for_date_impl(self, target_date: date) -> pl.DataFrame:
         """从 enriched parquet 读取指定日期的基础数据并即时计算完整指标+信号。
 
         enriched parquet 仅存 14 列。读取后需要即时计算 ma/ema/macd/kdj/rsi/boll/momentum/signal 等列。
@@ -255,6 +265,15 @@ class ScreenerService:
         return df_result
 
     def _load_enriched_history(self, target_date: date, lookback_days: int) -> pl.DataFrame:
+        if self.asset_type != "etf":
+            return self._load_enriched_history_impl(target_date, lookback_days)
+        generation = get_enriched_generation(self.repo.store.data_dir, "etf")
+        result = self._load_enriched_history_impl(target_date, lookback_days, generation)
+        if generation != get_enriched_generation(self.repo.store.data_dir, "etf"):
+            raise EnrichedGenerationUnavailableError("ETF data changed during screening")
+        return result
+
+    def _load_enriched_history_impl(self, target_date: date, lookback_days: int, generation: str | None = None) -> pl.DataFrame:
         """读取目标日期之前的基础行情数据, 供历史窗口策略使用。
 
         优先从 repo 内存缓存获取 (启动时已预计算), 命中时 0ms。
@@ -278,6 +297,8 @@ class ScreenerService:
 
         # 优先级 2: 进程级 history_cache (之前的 TTL 缓存)
         cache_key = (self.asset_type, target_date, lookback_days)
+        if generation is not None:
+            cache_key += (str(self.repo.store.data_dir), generation)
         now = time.monotonic()
         ttl_cached = _history_cache.get(cache_key)
         if ttl_cached is not None:

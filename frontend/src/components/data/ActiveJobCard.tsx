@@ -14,6 +14,7 @@ export const STAGE_LABELS: Record<string, string> = {
   compute_enriched: '计算技术指标',
   sync_minute: '同步分钟 K',
   extend_history: '扩展日K历史',
+  extend_etf_history: '扩展 ETF 历史',
   extend_minute: '扩展分钟K历史',
   rebuild_enriched: '全量计算',
   refresh_views: '刷新视图',
@@ -68,6 +69,7 @@ export function ActiveJobCard({ job }: { job: PipelineJob }) {
   const meta = statusMap[job.status]
   const Icon = meta.icon
   const isDone = job.status === 'succeeded' || job.status === 'failed'
+  const label = job.status === 'succeeded' && job.result?.outcome === 'partial' ? '部分完成' : meta.label
   const stageLabel = isDone ? meta.label : (STAGE_LABELS[job.stage] ?? job.stage)
 
   return (
@@ -77,7 +79,7 @@ export function ActiveJobCard({ job }: { job: PipelineJob }) {
           <Icon className={`h-5 w-5 ${meta.color} ${meta.spinning ? 'animate-spin' : ''}`} />
           <div>
             <div className="text-sm font-medium text-foreground">
-              {meta.label}{!isDone && ` · ${stageLabel}`}
+              {label}{!isDone && ` · ${stageLabel}`}
             </div>
             <div className="text-xs text-secondary font-mono mt-0.5">
               {job.id} · {job.duration_s != null ? formatDuration(job.duration_s) : '进行中'}
@@ -111,7 +113,12 @@ export function ActiveJobCard({ job }: { job: PipelineJob }) {
 
       <LogViewer log={job.log} />
 
-      {job.status === 'succeeded' && job.result && (() => {
+      {isDone && job.result?.asset_type === 'etf' && (
+        <div className="mt-3 text-xs text-secondary">
+          日 K 写入 {job.result.daily_rows_written ?? 0} 行 · 指标写入 {job.result.enriched_rows_written ?? 0} 行 · <span className="whitespace-nowrap">最早 {job.result.earliest_after ?? '—'}</span>
+        </div>
+      )}
+      {job.status === 'succeeded' && job.result && job.result.asset_type !== 'etf' && (() => {
         const skipped = new Set(job.result.skipped_stages ?? [])
         const cell = (stage: string | null, v: string) =>
           stage && skipped.has(stage) ? '跳过' : v

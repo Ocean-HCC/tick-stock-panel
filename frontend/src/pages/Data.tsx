@@ -96,7 +96,7 @@ export function Data() {
     enabled: !!activeJobId,
     refetchInterval: (q: any) => {
       const j = q.state.data
-      return j && (j.status === 'succeeded' || j.status === 'failed') ? false : 1_000
+      return j && !j.worker_active && (j.status === 'succeeded' || j.status === 'failed') ? false : 1_000
     },
   })
 
@@ -258,6 +258,7 @@ export function Data() {
   // 路由感知能力门控: 矩阵判定生效源可用性, 未加载回退套餐视角
   const hasAdjCap = usableOr('adj_factor', !!tfCaps?.['adj_factor'])
   const hasDailyBatchCap = usableOr('daily', !!tfCaps?.['kline.daily.batch'])
+  const hasEtfHistoryCap = !!tfCaps?.['kline.daily.batch'] && (prefs.data?.daily_data_provider ?? 'tickflow') === 'tickflow'
   const hasMinuteCap = usableOr('minute', !!tfCaps?.['kline.minute.batch'])
   const indexAuto = prefs.data?.pipeline_pull_index ?? true
   const etfAuto = prefs.data?.pipeline_pull_etf ?? false
@@ -285,6 +286,13 @@ export function Data() {
     if (job.data && (job.data.status === 'succeeded' || job.data.status === 'failed')) {
       qc.invalidateQueries({ queryKey: QK.dataStatus })
       qc.invalidateQueries({ queryKey: QK.pipelineJobs })
+      if (job.data.plan?.asset_type === 'etf' || job.data.result?.asset_type === 'etf') {
+        for (const queryKey of [QK.kline('', '', '').slice(0, 1), QK.klineLatest('').slice(0, 1),
+          QK.watchlistEnriched().slice(0, 1), QK.watchlistKlineBatch('').slice(0, 1),
+          QK.screener, QK.screenerCached().slice(0, 1), QK.screenerKlineBatch('').slice(0, 1), QK.backtestStatus]) {
+          qc.invalidateQueries({ queryKey })
+        }
+      }
       // 同步任务结束后 regime 覆盖范围可能变化, 一并刷新画像
       qc.invalidateQueries({ queryKey: QK.regimeCoverage })
       // 同步重写了指数日K/enriched/日K → 失效消费这些数据的查询。
@@ -296,10 +304,11 @@ export function Data() {
         qc.invalidateQueries({ queryKey: ['watchlist-enriched'] })
         qc.invalidateQueries({ queryKey: ['kline-batch'] })
       }
+      if (job.data.worker_active) return
       const t = setTimeout(() => setActiveJobId(null), 5_000)
       return () => clearTimeout(t)
     }
-  }, [job.data?.status])
+  }, [job.data?.status, job.data?.worker_active])
 
   useEffect(() => {
     if (job.isError && /404/.test(String((job.error as any)?.message ?? ''))) {
@@ -522,6 +531,8 @@ export function Data() {
               { label: '指标', table: 'etf_enriched' },
             ] as FieldTab[]}
             onShowFields={(t) => setSchemaTable(t ?? 'etf_daily')}
+            onSettings={() => setOpenSettings(v => v === 'etf' ? null : 'etf')}
+            settingsOpen={openSettings === 'etf'}
           />
         )
       case 'minute':
@@ -1002,6 +1013,21 @@ export function Data() {
               isRunning={!!activeJobId}
               earliestDate={s?.daily?.earliest_date ?? null}
               onStart={() => setOpenSettings(null)}
+            />
+          </SettingsModal>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {openSettings === 'etf' && (
+          <SettingsModal title="ETF · 向前扩展历史" onClose={() => setOpenSettings(null)}>
+            <ExtendHistoryPanel
+              assetType="etf"
+              hasCap={hasEtfHistoryCap}
+              isRunning={!!activeJobId}
+              loading={status.isFetching}
+              earliestDate={s?.etf_daily?.storage === 'etf' ? s.etf_daily.earliest_date : null}
+              onStart={jobId => { setActiveJobId(jobId); setOpenSettings(null) }}
             />
           </SettingsModal>
         )}

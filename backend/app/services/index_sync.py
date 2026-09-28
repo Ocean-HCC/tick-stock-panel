@@ -327,6 +327,20 @@ def sync_etf_adj_factor(
     )
 
 
+def iter_etf_daily_batches(symbols, capset, start_time, end_time, count=None, before_batch=None):
+    """Shared ETF download path; callers choose incremental or full-history calculation."""
+    limit = resolve_limit(capset, Cap.KLINE_DAILY_BATCH)
+    chunks = chunked(symbols, min_batch(preferences.get_index_daily_batch_size(), limit))
+    for i, chunk in enumerate(chunks):
+        if before_batch:
+            before_batch(i, len(chunks))
+        sleep_between_batches(i, limit.rpm)
+        raw = kline_sync.sync_daily_batch(
+            chunk, count=count, batch_size=None, start_time=start_time, end_time=end_time,
+        )
+        yield i, len(chunks), chunk, raw
+
+
 def sync_and_persist_etf_daily(
     repo: KlineRepository,
     capset: CapabilitySet,
@@ -355,24 +369,12 @@ def sync_and_persist_etf_daily(
     if not symbols:
         return 0
 
-    limit = resolve_limit(capset, Cap.KLINE_DAILY_BATCH)
-    batch_size = min_batch(preferences.get_index_daily_batch_size(), limit)
-
     end_time = end_date or datetime.now()
     start_time = start_date or (end_time - timedelta(days=365))
 
     total_rows = 0
-    chunks = chunked(symbols, batch_size)
     factors = _load_etf_factors(repo)
-    for i, chunk in enumerate(chunks):
-        sleep_between_batches(i, limit.rpm)
-        raw = kline_sync.sync_daily_batch(
-            chunk,
-            count=count,
-            batch_size=None,
-            start_time=start_time,
-            end_time=end_time,
-        )
+    for i, total, chunk, raw in iter_etf_daily_batches(symbols, capset, start_time, end_time, count):
         if raw.is_empty():
             continue
 
@@ -386,7 +388,7 @@ def sync_and_persist_etf_daily(
         enriched = compute_enriched(hist, factors=batch_factors, instruments=None)
         repo.append_etf_enriched(enriched)
         total_rows += raw.height
-        logger.info("etf daily synced: %d/%d chunks, +%d rows", i + 1, len(chunks), raw.height)
+        logger.info("etf daily synced: %d/%d chunks, +%d rows", i + 1, total, raw.height)
         if on_chunk_done:
             on_chunk_done(i + 1, len(chunks))
         del raw, enriched, local, hist
