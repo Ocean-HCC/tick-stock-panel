@@ -101,8 +101,8 @@ export function ExtendHistoryPanel({ hasCap, isRunning, earliestDate, onStart, a
 
       <button
         onClick={() => extend.mutate()}
-        disabled={disabled}
-        className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-btn bg-accent/90 text-base text-xs font-medium hover:bg-accent disabled:opacity-40 disabled:pointer-events-none transition-colors duration-150"
+        disabled={!hasBatchCap || isRunning || extend.isPending || !earliestDate}
+        className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-btn bg-accent/90 text-white text-xs font-medium hover:bg-accent disabled:opacity-40 disabled:pointer-events-none transition-colors duration-150"
       >
         {extend.isPending ? (
           <>
